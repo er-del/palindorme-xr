@@ -13,6 +13,7 @@ enum class WindowType(
     val countsAgainstActiveLimit: Boolean
 ) {
     APP_LIBRARY("Spatial Phone Launcher", 1.56f, 1.04f, true),
+    SPATIAL_DOCK("Spatial Dock", 2.40f, 0.68f, false),
     BROWSER("Spatial Browser", 1.65f, 1.10f, true),
     MEDIA_PLAYER("Media3 Cinema", 1.75f, 1.02f, true),
     GALLERY("Photo Gallery", 1.40f, 0.96f, true),
@@ -33,6 +34,12 @@ enum class WindowHitRegion {
     MINIMIZE_BUTTON,
     RESIZE_HANDLE,
     GRABBER_BAR
+}
+
+enum class SpatialWindowAction {
+    FOCUS,
+    MINIMIZE,
+    CLOSE
 }
 
 enum class DockActionId(val label: String, val iconGlyph: String) {
@@ -63,7 +70,7 @@ data class SpatialWindowState(
     val suspended: Boolean = false,
     val zOrder: Int = 1,
     val pixelWidth: Int = 1024,
-    val pixelHeight: Int = 640
+    val pixelHeight: Int = if (type == WindowType.SPATIAL_DOCK) 340 else 640
 ) {
     fun computeWorldBasis(): WindowBasis {
         val az = azimuthDeg * (PI.toFloat() / 180f)

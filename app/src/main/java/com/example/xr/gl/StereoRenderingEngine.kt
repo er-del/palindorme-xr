@@ -22,7 +22,6 @@ import com.example.xr.tracking.HeadPoseSnapshot
 import com.example.xr.tracking.HeadTrackingEngine
 import com.example.xr.tracking.Ray
 import com.example.xr.tracking.Vec3
-import com.example.xr.windows.DockActionId
 import com.example.xr.windows.RaycastTarget
 import com.example.xr.windows.SpatialWindowManager
 import com.example.xr.windows.SpatialWindowState
@@ -384,7 +383,7 @@ class StereoRenderingEngine(
         visibleWindowsScratch.clear()
         for (i in allWindows.indices) {
             val w = allWindows[i]
-            if (!w.minimized) visibleWindowsScratch.add(w)
+            if (!w.minimized && !w.suspended) visibleWindowsScratch.add(w)
         }
         for (i in 1 until visibleWindowsScratch.size) {
             val key = visibleWindowsScratch[i]
@@ -580,6 +579,7 @@ class StereoRenderingEngine(
 
         for (i in visibleWindowsScratch.indices) {
             val win = visibleWindowsScratch[i]
+            if (win.type == WindowType.SPATIAL_DOCK) continue
             val isGrabHovered = rayHit is RaycastTarget.WindowHit &&
                 rayHit.windowId == win.id &&
                 rayHit.region == WindowHitRegion.GRABBER_BAR
@@ -587,8 +587,6 @@ class StereoRenderingEngine(
                 drawWindowGrabberBar(win, isGrabHovered, settings)
             }
         }
-
-        drawSpatialDock(rayHit)
 
         if (settings.handControlEnabled && settings.handSkeletonOverlay) {
             if (latestHands.isNotEmpty()) {
@@ -907,92 +905,6 @@ class StereoRenderingEngine(
         GLES30.glDrawElements(GLES30.GL_TRIANGLES, gltfIdxCount, GLES30.GL_UNSIGNED_SHORT, idx)
         GLES30.glDisableVertexAttribArray(0)
         GLES30.glDisableVertexAttribArray(1)
-    }
-
-    private fun drawSpatialDock(rayHit: RaycastTarget?) {
-        GLES30.glUseProgram(color3dProg)
-        GLES30.glUniformMatrix4fv(colMvpLoc, 1, false, vpMatrix, 0)
-        GLES30.glUniform1f(colPointSizeLoc, 1f)
-        GLES30.glUniform1f(colBrightnessLoc, 1f)
-
-        val targets = windowManager.dockTargets
-        if (targets.size >= 2) {
-            // Subtle translucent Vision-style dock tray backing segments between icons
-            for (i in 0 until targets.size - 1) {
-                val a = targets[i]
-                val b = targets[i + 1]
-                val backDir = (a.normal + b.normal).normalized() * -0.02f
-                val au = a.up * (a.height * 0.65f)
-                val bu = b.up * (b.height * 0.65f)
-                val p0 = a.center - au + backDir
-                val p1 = b.center - bu + backDir
-                val p2 = b.center + bu + backDir
-                val p3 = a.center + au + backDir
-                dockColorBuffer.clear()
-                putColorTriVert(dockColorBuffer, p0, 0.06f, 0.11f, 0.20f, 0.48f)
-                putColorTriVert(dockColorBuffer, p1, 0.06f, 0.11f, 0.20f, 0.48f)
-                putColorTriVert(dockColorBuffer, p2, 0.06f, 0.11f, 0.20f, 0.48f)
-                putColorTriVert(dockColorBuffer, p0, 0.06f, 0.11f, 0.20f, 0.48f)
-                putColorTriVert(dockColorBuffer, p2, 0.06f, 0.11f, 0.20f, 0.48f)
-                putColorTriVert(dockColorBuffer, p3, 0.06f, 0.11f, 0.20f, 0.48f)
-                drawColorVerts(dockColorBuffer, 6, GLES30.GL_TRIANGLES)
-            }
-        }
-
-        for (dock in targets) {
-            val hovered = rayHit is RaycastTarget.DockHit && rayHit.action == dock.action
-            val isArActive = dock.action == DockActionId.AR_PASSTHROUGH && (passthroughActive || arCoreActive)
-            val hw = dock.width * (if (hovered) 0.56f else 0.46f)
-            val hh = dock.height * (if (hovered) 0.56f else 0.46f)
-            val c = dock.center
-            val r = dock.right * hw
-            val u = dock.up * hh
-
-            val cr = when {
-                hovered -> 0.22f
-                isArActive -> 0.20f
-                dock.action == DockActionId.HANDS_OFF -> 0.92f
-                else -> 0.11f
-            }
-            val cg = when {
-                hovered -> 0.74f
-                isArActive -> 0.83f
-                dock.action == DockActionId.HANDS_OFF -> 0.58f
-                else -> 0.18f
-            }
-            val cb = when {
-                hovered -> 0.97f
-                isArActive -> 0.60f
-                dock.action == DockActionId.HANDS_OFF -> 0.12f
-                else -> 0.32f
-            }
-            val ca = if (hovered) 0.86f else 0.58f
-
-            dockColorBuffer.clear()
-            putColorTriVert(dockColorBuffer, c - r - u, cr, cg, cb, ca)
-            putColorTriVert(dockColorBuffer, c + r - u, cr, cg, cb, ca)
-            putColorTriVert(dockColorBuffer, c + r + u, cr, cg, cb, ca)
-            putColorTriVert(dockColorBuffer, c - r - u, cr, cg, cb, ca)
-            putColorTriVert(dockColorBuffer, c + r + u, cr, cg, cb, ca)
-            putColorTriVert(dockColorBuffer, c - r + u, cr, cg, cb, ca)
-            drawColorVerts(dockColorBuffer, 6, GLES30.GL_TRIANGLES)
-
-            // Specular cyan rim outline for each translucent dock pill
-            dockColorBuffer.clear()
-            val edgeA = if (hovered) 0.98f else 0.45f
-            val er = if (hovered) 0.45f else 0.32f
-            val eg = if (hovered) 0.90f else 0.74f
-            val eb = 0.99f
-            putColorTriVert(dockColorBuffer, c - r - u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c + r - u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c + r - u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c + r + u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c + r + u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c - r + u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c - r + u, er, eg, eb, edgeA)
-            putColorTriVert(dockColorBuffer, c - r - u, er, eg, eb, edgeA)
-            drawColorVerts(dockColorBuffer, 8, GLES30.GL_LINES)
-        }
     }
 
     private fun drawCalibrationGrid(isLeftEye: Boolean) {

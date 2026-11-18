@@ -2,10 +2,13 @@ package com.example.xr.apps
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.os.Build
 import com.example.xr.system.NotificationHelper
+import com.example.xr.launcher.LauncherAppCategory
+import com.example.xr.launcher.classifyApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,7 +18,8 @@ import kotlinx.coroutines.withContext
 data class LaunchableApp(
     val packageName: String,
     val label: String,
-    val icon: Drawable?
+    val icon: Drawable?,
+    val category: LauncherAppCategory = LauncherAppCategory.TOOLS
 )
 
 /**
@@ -44,7 +48,15 @@ class AndroidAppManager(private val context: Context) {
                 LaunchableApp(
                     packageName = info.activityInfo.packageName,
                     label = info.loadLabel(pm).toString(),
-                    icon = runCatching { info.loadIcon(pm) }.getOrNull()
+                    icon = runCatching { info.loadIcon(pm) }.getOrNull(),
+                    category = classifyApp(
+                        isSystemApp = info.activityInfo.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM != 0,
+                        packageCategory = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            info.activityInfo.applicationInfo.category
+                        } else {
+                            ApplicationInfo.CATEGORY_UNDEFINED
+                        }
+                    )
                 )
             }
             .sortedBy { it.label.lowercase() }

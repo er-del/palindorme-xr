@@ -5,9 +5,6 @@ import com.example.xr.tracking.Vec3
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.sin
 
 class SpatialWindowManager(
     private val maxActiveContentWindows: Int = 4
@@ -21,14 +18,20 @@ class SpatialWindowManager(
     private val dragUndoMap = mutableMapOf<String, SpatialWindowState>()
     private var zCounter = 10
 
-    val dockTargets: List<DockTarget> = buildDockTargets()
-
     init {
         openDefaultWorkspace()
     }
 
     fun openDefaultWorkspace() {
-        _windows.value = listOf(
+        val defaults = listOf(
+            SpatialWindowState(
+                id = "win_dock",
+                type = WindowType.SPATIAL_DOCK,
+                azimuthDeg = 0f,
+                elevationDeg = -24f,
+                distanceMeters = 1.55f,
+                zOrder = ++zCounter
+            ),
             SpatialWindowState(
                 id = "win_apps",
                 type = WindowType.APP_LIBRARY,
@@ -54,6 +57,7 @@ class SpatialWindowManager(
                 zOrder = ++zCounter
             )
         )
+        _windows.value = enforceContentLimit(defaults.toMutableList(), "win_apps")
         _focusedWindowId.value = "win_apps"
     }
 
@@ -73,6 +77,7 @@ class SpatialWindowManager(
         }
 
         val slotAzimuth = when (type) {
+            WindowType.SPATIAL_DOCK -> 0f
             WindowType.SPATIAL_KEYBOARD -> 0f
             WindowType.CONTROL_CENTER -> 0f
             WindowType.HAND_LAB -> 26f
@@ -80,12 +85,14 @@ class SpatialWindowManager(
             else -> ((current.count { !it.minimized } % 5) - 2) * 22f
         }
         val slotElevation = when (type) {
+            WindowType.SPATIAL_DOCK -> -24f
             WindowType.SPATIAL_KEYBOARD -> -15f
             WindowType.CONTROL_CENTER -> -2f
             WindowType.PC_DESKTOP -> 7f
             else -> 6f
         }
         val slotDistance = when (type) {
+            WindowType.SPATIAL_DOCK -> 1.55f
             WindowType.SPATIAL_KEYBOARD -> 1.45f
             WindowType.CONTROL_CENTER -> 1.85f
             WindowType.HAND_LAB -> 2.05f
@@ -136,20 +143,41 @@ class SpatialWindowManager(
     }
 
     fun minimizeWindow(id: String) {
-        _windows.value = _windows.value.map {
+        if (_windows.value.any { it.id == id && it.type == WindowType.SPATIAL_DOCK }) return
+        val updated = _windows.value.map {
             if (it.id == id) it.copy(minimized = true) else it
         }
-        if (_focusedWindowId.value == id) {
-            _focusedWindowId.value = _windows.value.firstOrNull { !it.minimized }?.id
-        }
+        val preferredFocusId = if (_focusedWindowId.value == id) null else _focusedWindowId.value
+        updateFocusAndWindowLimit(updated, preferredFocusId)
     }
 
     fun closeWindow(id: String) {
-        _windows.value = _windows.value.filterNot { it.id == id }
+        if (_windows.value.any { it.id == id && it.type == WindowType.SPATIAL_DOCK }) return
+        val updated = _windows.value.filterNot { it.id == id }
         dragUndoMap.remove(id)
-        if (_focusedWindowId.value == id) {
-            _focusedWindowId.value = _windows.value.firstOrNull { !it.minimized }?.id
+        val preferredFocusId = if (_focusedWindowId.value == id) null else _focusedWindowId.value
+        updateFocusAndWindowLimit(updated, preferredFocusId)
+    }
+
+    private fun updateFocusAndWindowLimit(
+        windows: List<SpatialWindowState>,
+        preferredFocusId: String?
+    ) {
+        val visibleCandidates = windows.filter {
+            !it.minimized && it.type != WindowType.SPATIAL_DOCK
         }
+        val focused = visibleCandidates.firstOrNull { it.id == preferredFocusId }
+            ?: visibleCandidates
+                .filter { it.type.countsAgainstActiveLimit }
+                .maxByOrNull { it.zOrder }
+            ?: visibleCandidates.maxByOrNull { it.zOrder }
+        val activated = if (focused?.type?.countsAgainstActiveLimit == true) {
+            windows.map { if (it.id == focused.id) it.copy(suspended = false) else it }
+        } else {
+            windows
+        }
+        _windows.value = enforceContentLimit(activated.toMutableList(), focused?.id.orEmpty())
+        _focusedWindowId.value = focused?.id
     }
 
     fun snapshotForDrag(id: String) {
@@ -166,6 +194,7 @@ class SpatialWindowManager(
     }
 
     fun moveWindow(id: String, deltaAzimuthDeg: Float, deltaElevationDeg: Float, depthDeltaMeters: Float) {
+        if (_windows.value.any { it.id == id && it.type == WindowType.SPATIAL_DOCK }) return
         _windows.value = _windows.value.map { win ->
             if (win.id != id) win
             else win.copy(
@@ -177,6 +206,7 @@ class SpatialWindowManager(
     }
 
     fun resizeWindow(id: String, scaleRatio: Float, yawDeltaDeg: Float = 0f) {
+        if (_windows.value.any { it.id == id && it.type == WindowType.SPATIAL_DOCK }) return
         _windows.value = _windows.value.map { win ->
             if (win.id != id) win
             else win.copy(
@@ -188,7 +218,9 @@ class SpatialWindowManager(
     }
 
     fun cycleFocus(forward: Boolean = true) {
-        val visible = _windows.value.filter { !it.minimized }
+        val visible = _windows.value.filter {
+            !it.minimized && !it.suspended && it.type != WindowType.SPATIAL_DOCK
+        }
         if (visible.isEmpty()) return
         val curIdx = visible.indexOfFirst { it.id == _focusedWindowId.value }
         val nextIdx = if (curIdx < 0) 0 else {
@@ -200,7 +232,7 @@ class SpatialWindowManager(
 
     fun recenterWindowsToFront() {
         val list = _windows.value
-        val active = list.filter { !it.minimized }
+        val active = list.filter { !it.minimized && it.type != WindowType.SPATIAL_DOCK }
         if (active.isEmpty()) {
             openDefaultWorkspace()
             return
@@ -209,7 +241,7 @@ class SpatialWindowManager(
         val startAz = -((active.size - 1) * spread) * 0.5f
         var idx = 0
         _windows.value = list.map { win ->
-            if (win.minimized) win
+            if (win.minimized || win.type == WindowType.SPATIAL_DOCK) win
             else {
                 val az = startAz + (idx++) * spread
                 win.copy(azimuthDeg = az.coerceIn(-75f, 75f), elevationDeg = 5f)
@@ -219,7 +251,7 @@ class SpatialWindowManager(
 
     fun raycast(ray: Ray): RaycastTarget? {
         var bestWinHit: RaycastTarget.WindowHit? = null
-        val visible = _windows.value.filter { !it.minimized }.sortedByDescending { it.zOrder }
+        val visible = _windows.value.filter { !it.minimized && !it.suspended }.sortedByDescending { it.zOrder }
         for (win in visible) {
             val basis = win.computeWorldBasis()
             val hit = ray.intersectQuad(
@@ -233,7 +265,11 @@ class SpatialWindowManager(
 
             if (bestWinHit == null || hit.distance < bestWinHit.distance) {
                 val (magU, magV) = applyTargetMagnetism(hit.u, hit.v)
-                val region = classifyRegionStatic(magU, magV)
+                val region = if (win.type == WindowType.SPATIAL_DOCK) {
+                    WindowHitRegion.CONTENT_BODY
+                } else {
+                    classifyRegionStatic(magU, magV)
+                }
                 bestWinHit = RaycastTarget.WindowHit(
                     windowId = win.id,
                     region = region,
@@ -244,28 +280,7 @@ class SpatialWindowManager(
             }
         }
 
-        var bestDockHit: RaycastTarget.DockHit? = null
-        for (dock in dockTargets) {
-            // 18% hit-target comfort padding (~48dp-eq minimum angular hit target)
-            val hit = ray.intersectQuad(
-                quadCenter = dock.center,
-                quadRight = dock.right,
-                quadUp = dock.up,
-                quadNormal = dock.normal,
-                width = dock.width * 1.18f,
-                height = dock.height * 1.18f
-            ) ?: continue
-            if (bestDockHit == null || hit.distance < bestDockHit.distance) {
-                bestDockHit = RaycastTarget.DockHit(dock.action, hit.distance)
-            }
-        }
-
-        return when {
-            bestWinHit != null && bestDockHit != null ->
-                if (bestDockHit.distance < bestWinHit.distance) bestDockHit else bestWinHit
-            bestWinHit != null -> bestWinHit
-            else -> bestDockHit
-        }
+        return bestWinHit
     }
 
     private fun applyTargetMagnetism(u: Float, v: Float): Pair<Float, Float> {
@@ -304,35 +319,4 @@ class SpatialWindowManager(
         }
     }
 
-    private fun buildDockTargets(): List<DockTarget> {
-        val actions = DockActionId.entries
-        val count = actions.size
-        val spacingDeg = 6.2f
-        val startAz = -((count - 1) * spacingDeg) * 0.5f
-        val elRad = -23f * (PI.toFloat() / 180f)
-        val dist = 1.95f
-
-        return actions.mapIndexed { idx, action ->
-            val azDeg = startAz + idx * spacingDeg
-            val az = azDeg * (PI.toFloat() / 180f)
-            val cosEl = cos(elRad)
-            val center = Vec3(
-                sin(az) * cosEl * dist,
-                sin(elRad) * dist,
-                -cos(az) * cosEl * dist
-            )
-            val right = Vec3(cos(az), 0f, sin(az)).normalized()
-            val normal = (Vec3.ZERO - center).normalized()
-            val up = normal.cross(right).normalized()
-            DockTarget(
-                action = action,
-                center = center,
-                right = right,
-                up = up,
-                normal = normal,
-                width = 0.21f,
-                height = 0.21f
-            )
-        }
-    }
 }

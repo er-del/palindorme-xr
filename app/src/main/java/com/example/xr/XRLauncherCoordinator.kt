@@ -28,6 +28,10 @@ import com.example.xr.hand.HandTraceRecorder
 import com.example.xr.hand.HandTrackingEngine
 import com.example.xr.hand.HandTrackingTelemetry
 import com.example.xr.input.InputInteractionManager
+import com.example.xr.launcher.LauncherAppCategory
+import com.example.xr.launcher.LauncherTab
+import com.example.xr.launcher.reconcilePinnedApps
+import com.example.xr.launcher.togglePinnedApp
 import com.example.xr.model.CinemaProjectionMode
 import com.example.xr.model.HandednessPreference
 import com.example.xr.model.ThermalPriority
@@ -55,6 +59,7 @@ import com.example.xr.system.SpatialAudioStatus
 import com.example.xr.tracking.HeadTrackingEngine
 import com.example.xr.tracking.TrackingTelemetry
 import com.example.xr.windows.DockActionId
+import com.example.xr.windows.SpatialWindowAction
 import com.example.xr.windows.SpatialWindowManager
 import com.example.xr.windows.VirtualContentHost
 import com.example.xr.windows.WindowType
@@ -77,6 +82,8 @@ enum class HubTab(val label: String) {
     OPTICS("Optics"),
     PERFORMANCE("Performance")
 }
+
+private const val MAX_DOCK_PINS = 6
 
 data class CompanionConnectRequest(
     val host: String,
@@ -143,6 +150,12 @@ class XRLauncherCoordinator(application: Application) : AndroidViewModel(applica
     private val _selectedHubTab = MutableStateFlow(HubTab.DISPLAY)
     val selectedHubTab: StateFlow<HubTab> = _selectedHubTab.asStateFlow()
 
+    private val _launcherTab = MutableStateFlow(LauncherTab.APPS)
+    val launcherTab: StateFlow<LauncherTab> = _launcherTab.asStateFlow()
+
+    private val _launcherCategory = MutableStateFlow(LauncherAppCategory.ALL)
+    val launcherCategory: StateFlow<LauncherAppCategory> = _launcherCategory.asStateFlow()
+
     private val _settings = MutableStateFlow(XRSettings())
     val settings: StateFlow<XRSettings> = _settings.asStateFlow()
 
@@ -185,6 +198,10 @@ class XRLauncherCoordinator(application: Application) : AndroidViewModel(applica
         }
         viewModelScope.launch {
             appManager.refreshInstalledApps()
+            settingsManager.update { current ->
+                val pinned = reconcilePinnedApps(current.favoriteApps, appManager.apps.value)
+                if (pinned == current.favoriteApps) current else current.copy(favoriteApps = pinned)
+            }
         }
         viewModelScope.launch {
             var lastThermalMaxFps = -1
@@ -236,7 +253,11 @@ class XRLauncherCoordinator(application: Application) : AndroidViewModel(applica
                     device = _deviceHardware.value,
                     pcLink = pcCompanion.stats.value,
                     debugBitmap = handTracking.getLatestDebugBitmap(),
-                    debugHands = handTracking.getLatestHands()
+                    debugHands = handTracking.getLatestHands(),
+                    launcherTab = _launcherTab.value,
+                    launcherCategory = _launcherCategory.value,
+                    windows = windowManager.windows.value,
+                    focusedWindowId = windowManager.focusedWindowId.value
                 )
                 _spatialAudioStatus.value = AudioSpatializerHelper.query(ctx)
                 delay(250L)
@@ -320,6 +341,17 @@ class XRLauncherCoordinator(application: Application) : AndroidViewModel(applica
         contentHost.onLaunchAppRequested = { app ->
             _dialogs.value = _dialogs.value.copy(pendingLaunchApp = app)
         }
+        contentHost.onLauncherTabSelected = ::selectLauncherTab
+        contentHost.onLauncherCategorySelected = ::selectLauncherCategory
+        contentHost.onDockPinToggleRequested = ::toggleDockPin
+        contentHost.onDockActionRequested = ::handleDockAction
+        contentHost.onWindowAction = { windowId, action ->
+            when (action) {
+                SpatialWindowAction.FOCUS -> windowManager.focusWindow(windowId)
+                SpatialWindowAction.MINIMIZE -> windowManager.minimizeWindow(windowId)
+                SpatialWindowAction.CLOSE -> windowManager.closeWindow(windowId)
+            }
+        }
 
         contentHost.onOpenKeyboardRequested = { initial, _ ->
             windowManager.openOrFocusWindow(WindowType.SPATIAL_KEYBOARD)
@@ -367,6 +399,7 @@ class XRLauncherCoordinator(application: Application) : AndroidViewModel(applica
                 "open_gallery" -> windowManager.openOrFocusWindow(WindowType.GALLERY)
                 "open_gltf" -> windowManager.openOrFocusWindow(WindowType.GLTF_VIEWER)
                 "open_settings" -> windowManager.openOrFocusWindow(WindowType.SETTINGS)
+                "open_control_center" -> windowManager.openOrFocusWindow(WindowType.CONTROL_CENTER)
                 "open_hand_lab" -> windowManager.openOrFocusWindow(WindowType.HAND_LAB)
                 "open_pc_desktop" -> windowManager.openOrFocusWindow(WindowType.PC_DESKTOP)
                 "toggle_trace_capture" -> toggleTraceRecording()
@@ -490,6 +523,31 @@ class XRLauncherCoordinator(application: Application) : AndroidViewModel(applica
         _selectedHubTab.value = tab
         if (tab == HubTab.TRACKING || tab == HubTab.PERFORMANCE) {
             arPerception.checkAvailability()
+        }
+    }
+
+    fun selectLauncherTab(tab: LauncherTab) {
+        _launcherTab.value = tab
+    }
+
+    fun selectLauncherCategory(category: LauncherAppCategory) {
+        _launcherCategory.value = category
+    }
+
+    fun toggleDockPin(packageName: String) {
+        val current = _settings.value.favoriteApps
+        if (packageName !in current && current.size >= MAX_DOCK_PINS) {
+            postStatusToast("The spatial dock supports up to $MAX_DOCK_PINS pinned apps.")
+            return
+        }
+        updateSettings { settings ->
+            settings.copy(
+                favoriteApps = togglePinnedApp(
+                    current = settings.favoriteApps,
+                    packageName = packageName,
+                    maxPins = MAX_DOCK_PINS
+                )
+            )
         }
     }
 

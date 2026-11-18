@@ -30,8 +30,10 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.compose.ui.graphics.toArgb
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -41,6 +43,9 @@ import com.example.xr.companion.CompanionLinkStats
 import com.example.xr.hand.HandFrame
 import com.example.xr.hand.HandLandmarkIndex
 import com.example.xr.hand.HandTrackingTelemetry
+import com.example.xr.launcher.LauncherAppCategory
+import com.example.xr.launcher.LauncherTab
+import com.example.xr.launcher.filterApps
 import com.example.xr.model.EnvironmentConfig
 import com.example.xr.model.VirtualEnvironmentType
 import com.example.xr.model.XRSettings
@@ -48,6 +53,11 @@ import com.example.xr.perception.ArPerceptionTelemetry
 import com.example.xr.system.DeviceHardwareDiagnostics
 import com.example.xr.system.PerformanceTelemetry
 import com.example.xr.tracking.TrackingTelemetry
+import com.example.ui.theme.CanvasObsidian as ThemeCanvasObsidian
+import com.example.ui.theme.SkyPrimary as ThemeSkyPrimary
+import com.example.ui.theme.SkyPrimaryDim as ThemeSkyPrimaryDim
+import com.example.ui.theme.SpatialGlass as ThemeSpatialGlass
+import com.example.ui.theme.SpatialGlassHighContrast as ThemeSpatialGlassHighContrast
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -81,6 +91,16 @@ class VirtualContentHost(
     private var latestDebugBitmap: android.graphics.Bitmap? = null
     private var latestDebugHands: List<HandFrame> = emptyList()
     private var latestGalleryUris: List<Uri> = emptyList()
+    private var latestLauncherTab: LauncherTab = LauncherTab.APPS
+    private var latestLauncherCategory: LauncherAppCategory = LauncherAppCategory.ALL
+    private var latestWindows: List<SpatialWindowState> = emptyList()
+    private var latestFocusedWindowId: String? = null
+    private var lastDockClockText: String = ""
+    private var latestDockClockText: String = ""
+    private var latestLauncherStatusText: String = ""
+    private var latestLauncherPanelSignature: String = ""
+    private var latestDockAppsSignature: String = ""
+    private var latestControlCenterSignature: String = ""
     private var currentBrowserUrl: String = "https://en.wikipedia.org/wiki/Spatial_computing"
     private var selectedGltfName: String = "Palindorme Gyro Prism"
     private var lastTouchDownTime: Long = 0L
@@ -94,6 +114,11 @@ class VirtualContentHost(
     var onMediaVideoSizeChanged: ((Int, Int) -> Unit)? = null
     var onSettingsMutated: (((XRSettings) -> XRSettings) -> Unit)? = null
     var onActionCommand: ((String) -> Unit)? = null
+    var onLauncherTabSelected: ((LauncherTab) -> Unit)? = null
+    var onLauncherCategorySelected: ((LauncherAppCategory) -> Unit)? = null
+    var onDockPinToggleRequested: ((String) -> Unit)? = null
+    var onDockActionRequested: ((DockActionId) -> Unit)? = null
+    var onWindowAction: ((String, SpatialWindowAction) -> Unit)? = null
 
     private var keyboardSubmitCallback: ((String) -> Unit)? = null
     private var browserWebView: WebView? = null
@@ -184,7 +209,11 @@ class VirtualContentHost(
         device: DeviceHardwareDiagnostics = latestDevice,
         pcLink: CompanionLinkStats = latestPcLink,
         debugBitmap: android.graphics.Bitmap? = latestDebugBitmap,
-        debugHands: List<HandFrame> = latestDebugHands
+        debugHands: List<HandFrame> = latestDebugHands,
+        launcherTab: LauncherTab = latestLauncherTab,
+        launcherCategory: LauncherAppCategory = latestLauncherCategory,
+        windows: List<SpatialWindowState> = latestWindows,
+        focusedWindowId: String? = latestFocusedWindowId
     ) {
         latestSettings = settings
         latestApps = apps
@@ -197,6 +226,26 @@ class VirtualContentHost(
         latestPcLink = pcLink
         latestDebugBitmap = debugBitmap
         latestDebugHands = debugHands
+        latestLauncherTab = launcherTab
+        latestLauncherCategory = launcherCategory
+        latestWindows = windows
+        latestFocusedWindowId = focusedWindowId
+        latestDockClockText = timeFormat.format(Date())
+        latestLauncherStatusText =
+            "${latestDockClockText} · ${latestPerf.batteryPercent}% · AR:${if (latestSettings.passthroughEnabled) "ON" else "OFF"} · Cam:${latestSettings.cameraRotationDegrees}°"
+        latestLauncherPanelSignature = listOf(
+            latestLauncherTab,
+            latestLauncherCategory,
+            latestApps.map { it.packageName to it.label },
+            latestSettings.favoriteApps,
+            latestWindows.map { Triple(it.id, it.type, it.minimized to it.suspended) },
+            latestFocusedWindowId,
+            latestSettings.environment.type,
+            latestSettings.immersionLevel,
+            latestSettings.highContrastGlass
+        ).toString()
+        latestDockAppsSignature = "${latestApps.map { it.packageName to it.label }}|${latestSettings.favoriteApps}|${latestSettings.highContrastGlass}"
+        latestControlCenterSignature = "${latestSettings.passthroughEnabled}|${latestSettings.handControlEnabled}|${latestSettings.arCoreEnabled}|${latestSettings.cinemaModeEnabled}|${latestSettings.immersionLevel}|${latestSettings.environment.type}|${latestSettings.highContrastGlass}"
     }
 
     fun ensureViewWindowHosted(window: SpatialWindowState) {
@@ -414,7 +463,7 @@ class VirtualContentHost(
         style = Paint.Style.FILL
     }
     private val glassStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#597DD3FC")
+        color = ThemeSkyPrimaryDim.toArgb()
         style = Paint.Style.STROKE
         strokeWidth = 3f
     }
@@ -433,20 +482,20 @@ class VirtualContentHost(
             entry.canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
             glassRect.set(2f, 2f, entry.widthPx - 2f, entry.heightPx - 2f)
             glassBgPaint.color = if (latestSettings.highContrastGlass) {
-                Color.parseColor("#DF091120")
+                ThemeSpatialGlassHighContrast.toArgb()
             } else {
-                Color.parseColor("#920E182D")
+                ThemeSpatialGlass.toArgb()
             }
             entry.canvas.drawRoundRect(glassRect, 28f, 28f, glassBgPaint)
             entry.canvas.drawRoundRect(glassRect, 28f, 28f, glassSheenPaint)
             entry.rootView.draw(entry.canvas)
-            drawWindowTitleChrome(entry.canvas, entry)
+            if (entry.type != WindowType.SPATIAL_DOCK) drawWindowTitleChrome(entry.canvas, entry)
             entry.canvas.drawRoundRect(glassRect, 28f, 28f, glassStrokePaint)
             entry.sequence++
         }
     }
 
-    private val chromeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#66182844") }
+    private val chromeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ThemeSpatialGlass.toArgb() }
     private val chromeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#F8FAFC")
         textSize = 27f
@@ -482,6 +531,7 @@ class VirtualContentHost(
     private fun buildViewForWindow(window: SpatialWindowState): View {
         return when (window.type) {
             WindowType.APP_LIBRARY -> buildAppLibraryView()
+            WindowType.SPATIAL_DOCK -> buildSpatialDockView()
             WindowType.BROWSER -> buildBrowserView()
             WindowType.GALLERY -> buildGalleryView()
             WindowType.GLTF_VIEWER -> buildGltfControlsView()
@@ -505,7 +555,7 @@ class VirtualContentHost(
     }
 
     private var lastGalleryRenderSignature: String = ""
-    private var lastLauncherAppsSignature: Int = -1
+    private var lastLauncherViewSignature: String = ""
     private var lastQuickSettingsSignature: String = ""
 
     private fun refreshDynamicPanels(entry: HostedViewBitmap): Boolean {
@@ -529,21 +579,58 @@ class VirtualContentHost(
                 } else false
             }
             WindowType.APP_LIBRARY -> {
-                val statusText =
-                    "${timeFormat.format(Date())} · ${latestPerf.batteryPercent}% · AR:${if (latestSettings.passthroughEnabled) "ON" else "OFF"} · Cam:${latestSettings.cameraRotationDegrees}°"
-                val appsCount = latestApps.size
-                if (appsCount != lastLauncherAppsSignature) {
-                    lastLauncherAppsSignature = appsCount
-                    entry.rootView.findViewWithTag<LinearLayout>("launcher_apps_grid")?.let { grid ->
-                        populateLauncherGrid(grid)
+                val sig = latestLauncherPanelSignature
+                var changed = false
+                if (sig != lastLauncherViewSignature) {
+                    lastLauncherViewSignature = sig
+                    entry.rootView.findViewWithTag<LinearLayout>("launcher_content")?.let {
+                        populateLauncherContent(it)
                     }
+                    changed = true
                 }
-                val sig = "$statusText|$appsCount|${latestSettings.favoriteApps.size}|$contrastFlag"
+                val renderSignature = "$sig|$latestLauncherStatusText|$contrastFlag"
+                if (renderSignature != entry.lastRenderSignature) {
+                    entry.lastRenderSignature = renderSignature
+                    entry.rootView.findViewWithTag<TextView>("launcher_status_pill")?.text = latestLauncherStatusText
+                    changed = true
+                }
+                changed
+            }
+            WindowType.SPATIAL_DOCK -> {
+                val sig = latestDockAppsSignature
+                var changed = false
                 if (sig != entry.lastRenderSignature) {
                     entry.lastRenderSignature = sig
-                    entry.rootView.findViewWithTag<TextView>("launcher_status_pill")?.text = statusText
+                    entry.rootView.findViewWithTag<LinearLayout>("spatial_dock_apps")?.let {
+                        populateSpatialDockApps(it)
+                    }
+                    changed = true
+                }
+                if (latestDockClockText != lastDockClockText) {
+                    lastDockClockText = latestDockClockText
+                    entry.rootView.findViewWithTag<TextView>("spatial_dock_clock")?.text = latestDockClockText
+                    changed = true
+                }
+                changed
+            }
+            WindowType.CONTROL_CENTER -> {
+                val sig = latestControlCenterSignature
+                if (sig == entry.lastRenderSignature) {
+                    false
+                } else {
+                    entry.lastRenderSignature = sig
+                    entry.rootView.findViewWithTag<TextView>("control_center_status")?.text =
+                        "${latestSettings.environment.type.displayName} · ${(latestSettings.immersionLevel * 100).toInt()}% virtual"
+                    entry.rootView.findViewWithTag<Button>("control_center_toggle_passthrough")
+                        ?.background = glassPillDrawable(latestSettings.passthroughEnabled)
+                    entry.rootView.findViewWithTag<Button>("control_center_toggle_hands")
+                        ?.background = glassPillDrawable(latestSettings.handControlEnabled)
+                    entry.rootView.findViewWithTag<Button>("control_center_toggle_arcore")
+                        ?.background = glassPillDrawable(latestSettings.arCoreEnabled)
+                    entry.rootView.findViewWithTag<Button>("control_center_toggle_cinema")
+                        ?.background = glassPillDrawable(latestSettings.cinemaModeEnabled)
                     true
-                } else false
+                }
             }
             WindowType.GALLERY -> {
                 val sig = "${latestGalleryUris.joinToString(",")}|${latestSettings.galleryRotationDegrees}|$contrastFlag"
@@ -616,11 +703,11 @@ class VirtualContentHost(
         shape = GradientDrawable.RECTANGLE
         cornerRadius = 20f
         if (accent) {
-            setColor(Color.parseColor("#D938BDF8"))
-            setStroke(2, Color.parseColor("#BAE6FD"))
+            setColor(ThemeSkyPrimary.toArgb())
+            setStroke(2, ThemeSkyPrimaryDim.toArgb())
         } else {
-            setColor(Color.parseColor("#851E2E4A"))
-            setStroke(2, Color.parseColor("#597DD3FC"))
+            setColor(if (latestSettings.highContrastGlass) ThemeSpatialGlassHighContrast.toArgb() else ThemeSpatialGlass.toArgb())
+            setStroke(2, ThemeSkyPrimaryDim.toArgb())
         }
     }
 
@@ -629,7 +716,7 @@ class VirtualContentHost(
             text = label
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            setTextColor(Color.parseColor(if (accent) "#06101F" else "#F8FAFC"))
+            setTextColor(if (accent) ThemeCanvasObsidian.toArgb() else Color.parseColor("#F8FAFC"))
             background = glassPillDrawable(accent)
             setPadding(18, 12, 18, 12)
             setOnClickListener { onClick() }
@@ -643,9 +730,22 @@ class VirtualContentHost(
         }
 
     private fun buildAppLibraryView(): View {
-        val root = createSpatialContainer()
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(28, 78, 28, 24)
+        }
+        val main = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val tabs = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 12, 0)
+            tag = "launcher_tabs"
+        }
+        root.addView(tabs, LinearLayout.LayoutParams(176, LinearLayout.LayoutParams.MATCH_PARENT))
+        root.addView(main, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
 
-        // Top Vision-style status strip
         val statusRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -671,49 +771,318 @@ class VirtualContentHost(
         statusRow.addView(arBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = 8 })
         statusRow.addView(rotCamBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = 8 })
         statusRow.addView(hubBtn)
-        root.addView(statusRow)
-
-        // Spatial App Quick Launch Bar
-        val quickRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, 12)
-        }
-        val spatialShortcuts = listOf(
-            "🌐 Web" to "open_browser",
-            "▶ Cinema" to "open_media",
-            "🖼 Photos" to "open_gallery",
-            "◈ 3D Stage" to "open_gltf",
-            "⚙ Optics" to "open_settings"
-        )
-        spatialShortcuts.forEach { (label, cmd) ->
-            quickRow.addView(
-                spatialButton(label) { onActionCommand?.invoke(cmd) },
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 6 }
+        main.addView(statusRow)
+        LauncherTab.entries.forEach { tab ->
+            val label = when (tab) {
+                LauncherTab.APPS -> "Apps"
+                LauncherTab.ENVIRONMENTS -> "Environments"
+                LauncherTab.WINDOWS -> "Windows"
+                LauncherTab.SETTINGS -> "Settings"
+            }
+            val button = spatialButton(label, accent = latestLauncherTab == tab) {
+                latestLauncherTab = tab
+                onLauncherTabSelected?.invoke(tab)
+                root.findViewWithTag<LinearLayout>("launcher_content")?.let {
+                    populateLauncherContent(it)
+                }
+                root.findViewWithTag<LinearLayout>("launcher_tabs")?.let { tabRow ->
+                    updateLauncherTabStyles(tabRow)
+                }
+            }.apply {
+                tag = "launcher_tab_${tab.name.lowercase()}"
+            }
+            tabs.addView(
+                button,
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = 10
+                }
             )
         }
-        root.addView(quickRow)
 
-        root.addView(spatialText("Android Phone Apps (VR Spatial Grid)", 18f, "#BAE6FD"))
+        val content = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "launcher_content"
+        }
+        main.addView(content, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
+        populateLauncherContent(content)
+        return root
+    }
 
-        val scroll = ScrollView(context)
+    private fun updateLauncherTabStyles(tabRow: LinearLayout) {
+        LauncherTab.entries.forEach { tab ->
+            tabRow.findViewWithTag<Button>("launcher_tab_${tab.name.lowercase()}")
+                ?.background = glassPillDrawable(accent = latestLauncherTab == tab)
+        }
+    }
+
+    private fun populateLauncherContent(content: LinearLayout) {
+        content.removeAllViews()
+        when (latestLauncherTab) {
+            LauncherTab.APPS -> populateLauncherApps(content)
+            LauncherTab.ENVIRONMENTS -> populateLauncherEnvironments(content)
+            LauncherTab.WINDOWS -> populateLauncherWindows(content)
+            LauncherTab.SETTINGS -> populateLauncherSettings(content)
+        }
+    }
+
+    private fun populateLauncherApps(content: LinearLayout) {
+        val categories = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 10)
+        }
+        LauncherAppCategory.entries.forEach { category ->
+            val button = spatialButton(
+                category.name.lowercase().replaceFirstChar { it.uppercase() },
+                accent = latestLauncherCategory == category
+            ) {
+                latestLauncherCategory = category
+                onLauncherCategorySelected?.invoke(category)
+                populateLauncherApps(content)
+            }.apply { tag = "launcher_category_${category.name.lowercase()}" }
+            categories.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        content.addView(categories)
+
         val grid = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             tag = "launcher_apps_grid"
-            setPadding(0, 8, 0, 8)
         }
-        lastLauncherAppsSignature = latestApps.size
+        val scroll = ScrollView(context).apply { addView(grid) }
+        content.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
         populateLauncherGrid(grid)
-        scroll.addView(grid)
-        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    private fun populateLauncherEnvironments(content: LinearLayout) {
+        content.addView(spatialText("Choose an immersive environment", 20f))
+        val scroll = ScrollView(context)
+        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        VirtualEnvironmentType.entries.forEach { environment ->
+            val selected = latestSettings.environment.type == environment
+            val button = spatialButton(
+                "${environment.displayName}\n${environment.subtitle}",
+                accent = selected
+            ) {
+                onSettingsMutated?.invoke { settings ->
+                    settings.copy(
+                        environment = settings.environment.copy(
+                            type = environment,
+                            tintHex = environment.defaultTintHex
+                        )
+                    )
+                }
+            }.apply { tag = "launcher_environment_${environment.id}" }
+            list.addView(button, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = 8 })
+        }
+        addImmersionControl(list, "launcher_immersion")
+        scroll.addView(list)
+        content.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
+    }
+
+    private fun addImmersionControl(parent: LinearLayout, tagPrefix: String) {
+        val section = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = glassPillDrawable(accent = false)
+            setPadding(16, 10, 16, 8)
+        }
+        val label = spatialText("Immersion · ${(latestSettings.immersionLevel * 100).toInt()}% virtual", 17f, "#7DD3FC")
+            .apply { tag = "${tagPrefix}_label" }
+        val slider = SeekBar(context).apply {
+            tag = tagPrefix
+            max = 100
+            progress = (latestSettings.immersionLevel * 100).toInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    if (fromUser) label.text = "Immersion · $progress% virtual"
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar) {
+                    val level = seekBar.progress / 100f
+                    onSettingsMutated?.invoke { settings -> settings.copy(immersionLevel = level) }
+                }
+            })
+        }
+        section.addView(label)
+        section.addView(slider)
+        parent.addView(section, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = 10
+            bottomMargin = 8
+        })
+    }
+
+    private fun populateLauncherWindows(content: LinearLayout) {
+        val scroll = ScrollView(context)
+        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        latestWindows.filter { it.type != WindowType.SPATIAL_DOCK }.forEach { window ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = glassPillDrawable(accent = window.id == latestFocusedWindowId)
+                setPadding(12, 4, 12, 4)
+            }
+            val focus = spatialButton(window.title, accent = window.id == latestFocusedWindowId) {
+                onWindowAction?.invoke(window.id, SpatialWindowAction.FOCUS)
+            }.apply { tag = "window_focus_${window.id}" }
+            val minimize = spatialButton("−") {
+                onWindowAction?.invoke(window.id, SpatialWindowAction.MINIMIZE)
+            }.apply { tag = "window_minimize_${window.id}" }
+            val close = spatialButton("×") {
+                onWindowAction?.invoke(window.id, SpatialWindowAction.CLOSE)
+            }.apply { tag = "window_close_${window.id}" }
+            row.addView(focus, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(minimize)
+            row.addView(close)
+            list.addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = 8 })
+        }
+        if (list.childCount == 0) list.addView(spatialText("No open windows", 18f))
+        scroll.addView(list)
+        content.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.MATCH_PARENT
+        ))
+    }
+
+    private fun populateLauncherSettings(content: LinearLayout) {
+        content.addView(spatialText("Workspace controls", 20f))
+        listOf(
+            "Control Center" to "open_control_center",
+            "Optics & Camera" to "open_settings",
+            "Recenter Windows" to "recenter_windows",
+            "Toggle Passthrough" to "toggle_passthrough",
+            "Open 2D Hub" to "open_2d_hub"
+        ).forEach { (label, command) ->
+            val button = spatialButton(label) { onActionCommand?.invoke(command) }
+            content.addView(button, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = 8 })
+        }
+    }
+
+    private fun buildSpatialDockView(): View {
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(16, 10, 16, 10)
+        }
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(spatialText("Workspace", 18f, "#BAE6FD"), LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1f
+        ))
+        header.addView(spatialText(timeFormat.format(Date()), 18f, "#F8FAFC").apply {
+            tag = "spatial_dock_clock"
+        })
+        root.addView(header)
+
+        val actionRows = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        DockActionId.entries.chunked(6).forEach { actions ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            actions.forEachIndexed { index, action ->
+                val button = spatialButton("${action.iconGlyph}\n${action.label}") {
+                    onDockActionRequested?.invoke(action)
+                }.apply {
+                    tag = "dock_action_${action.name.lowercase()}"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                }
+                row.addView(button, LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    1f
+                ).apply { marginEnd = if (index < actions.lastIndex) 6 else 0 })
+            }
+            actionRows.addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            ).apply { bottomMargin = 4 })
+        }
+        root.addView(actionRows, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
+
+        root.addView(spatialText("Pinned Apps", 14f, "#7DD3FC"))
+        val pinnedApps = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            tag = "dock_pinned_apps"
+        }
+        populateSpatialDockApps(pinnedApps)
+        root.addView(pinnedApps, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
         return root
+    }
+
+    private fun populateSpatialDockApps(row: LinearLayout) {
+        row.removeAllViews()
+        val pinnedApps = latestApps
+            .filter { it.packageName in latestSettings.favoriteApps }
+            .sortedWith(compareBy<LaunchableApp> { it.label.lowercase(Locale.getDefault()) }.thenBy { it.packageName })
+        if (pinnedApps.isEmpty()) {
+            row.addView(spatialText("Pin apps from Apps to add them here.", 14f), LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            ))
+        } else {
+            pinnedApps.forEachIndexed { index, app ->
+                val tile = spatialButton(app.label, accent = true) {
+                    onLaunchAppRequested?.invoke(app)
+                }.apply { tag = "dock_app_${app.packageName}" }
+                tile.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                tile.maxLines = 1
+                tile.ellipsize = TextUtils.TruncateAt.END
+                row.addView(tile, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
+                    marginEnd = if (index < pinnedApps.lastIndex) 6 else 0
+                })
+            }
+        }
     }
 
     private fun populateLauncherGrid(grid: LinearLayout) {
         grid.removeAllViews()
-        val apps = latestApps.take(24)
+        val apps = filterApps(latestApps, latestLauncherCategory)
+            .sortedBy { it.label.lowercase(Locale.getDefault()) }
+            .take(24)
         if (apps.isEmpty()) {
-            grid.addView(spatialText("No external launcher apps discovered yet.", 18f))
+            grid.addView(spatialText("No apps in this category.", 18f).apply {
+                tag = "launcher_empty_apps"
+            })
             return
         }
         val columns = 3
@@ -748,13 +1117,26 @@ class VirtualContentHost(
                     setTextColor(Color.parseColor("#F8FAFC"))
                     setPadding(0, 8, 0, 0)
                 }
+                val pin = spatialButton(
+                    if (app.packageName in latestSettings.favoriteApps) "Unpin" else "Pin",
+                    accent = app.packageName in latestSettings.favoriteApps
+                ) {
+                    onDockPinToggleRequested?.invoke(app.packageName)
+                }.apply { tag = "launcher_pin_${app.packageName}" }
                 tile.addView(iconView, LinearLayout.LayoutParams(62, 62))
-                tile.addView(labelView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                tile.addView(labelView, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
+                tile.addView(pin)
                 row.addView(tile, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                     marginEnd = if (c < columns - 1) 10 else 0
                 })
             }
-            grid.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            grid.addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
         }
     }
 
@@ -1233,11 +1615,17 @@ class VirtualContentHost(
     private fun buildControlCenterView(): View {
         val root = createSpatialContainer()
         root.addView(spatialText("Control Center", 21f, "#7DD3FC"))
+        root.addView(spatialText(
+            "${latestSettings.environment.type.displayName} · ${(latestSettings.immersionLevel * 100).toInt()}% virtual",
+            16f,
+            "#BAE6FD"
+        ).apply { tag = "control_center_status" })
         val scroll = ScrollView(context)
         val col = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         val buttons = listOf(
             "Re-Center Head Pose" to "recenter",
             "Align Windows to Front Arc" to "recenter_windows",
+            "AR Passthrough (Permission Protected)" to "toggle_passthrough",
             "Open Hand Debug Lab" to "open_hand_lab",
             "Open PC Companion Stream" to "open_pc_desktop",
             "Peek Real World (Immersion Toggle)" to "toggle_peek",
@@ -1251,15 +1639,23 @@ class VirtualContentHost(
             "Switch to 2D Settings Hub" to "open_2d_hub"
         )
         buttons.forEach { (label, cmd) ->
+            val isActive = when (cmd) {
+                "toggle_passthrough" -> latestSettings.passthroughEnabled
+                "toggle_hands" -> latestSettings.handControlEnabled
+                "toggle_arcore" -> latestSettings.arCoreEnabled
+                "toggle_cinema" -> latestSettings.cinemaModeEnabled
+                else -> cmd == "recenter"
+            }
             col.addView(
-                spatialButton(label, accent = cmd == "recenter") {
+                spatialButton(label, accent = isActive) {
                     onActionCommand?.invoke(cmd)
-                },
+                }.apply { tag = "control_center_$cmd" },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     topMargin = 8
                 }
             )
         }
+        addImmersionControl(col, "control_center_immersion")
         scroll.addView(col)
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         return root
