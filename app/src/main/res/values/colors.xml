@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="obsidian_canvas">#060913</color>
+    <color name="spatial_glass">#121A2B</color>
+    <color name="sky_primary">#38BDF8</color>
+    <color name="indigo_secondary">#818CF8</color>
+    <color name="amber_warning">#F59E0B</color>
+    <color name="rose_error">#FB7185</color>
+</resources>

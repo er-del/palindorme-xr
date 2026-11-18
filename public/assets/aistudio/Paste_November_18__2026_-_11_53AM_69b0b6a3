@@ -1,0 +1,338 @@
+# PALINDORME XR — Spatial Computing Launcher & Stereo Environment
+
+**Revision 3** · Product & Architecture Plan (adds Hand Interaction)
+
+PALINDORME XR turns an ordinary Android phone, placed in a passive smartphone VR headset, into a stereoscopic spatial launcher with floating windows. It opens straight into a dual-viewport OpenGL ES 3.0 home with **3-DOF rotational head tracking**, gaze-dwell and Bluetooth gamepad input, experimental monocular camera passthrough, and optional ARCore world perception (which also enables limited 6-DOF positional tracking on supported devices).
+
+---
+
+## 0. What Changed in This Revision
+
+| Area | Change | Why |
+| :--- | :--- | :--- |
+| Terminology | "6-DOF-style rotational tracking" → **3-DOF rotational** by default; **6-DOF only in ARCore mode** | The original claim was contradictory and over-promised. |
+| Feasibility | ARCore moved from "no 6-DOF" to **"6-DOF via ARCore, device-dependent"** | ARCore motion tracking gives positional tracking. Phone-in-headset use is experimental because of lens-box occlusion and rear-camera framing. |
+| Window rendering | Replaced "Compose PlayerSurface" with **`SurfaceTexture` + `lockHardwareCanvas` / direct `setVideoSurface`**; added **touch-injection layer** | A WebView or Compose view cannot render to a GL texture on its own, and Compose's `PlayerSurface` is an on-screen surface. |
+| Sensors | Prefer **`TYPE_GAME_ROTATION_VECTOR`**, add prediction, add `HIGH_SAMPLING_RATE_SENSORS` | Avoids magnetometer drift/jumps in headsets (magnets). Android 12+ throttles sensors to 200 Hz without the permission. |
+| Performance | Added **frame budgets, ADPF hint sessions, sustained-performance mode, thermal tiers** | A phone in a headset throttles fast; this is the main product risk. |
+| Comfort & safety | New **comfort & motion-sickness section** | The original covered only the passthrough warning. |
+| Testing | Robolectric alone replaced by a **layered test strategy** | Robolectric cannot execute OpenGL. |
+| New sections | Non-goals, performance budgets, risk register, acceptance criteria, privacy, accessibility, device matrix | Needed for sign-off. |
+| Versions | Marked as **"pin and verify at Stage 1 kickoff"** | Dependency versions should come from the actual build, not memory. |
+| **Hand interaction (Rev 3)** | New **Hand Interaction System** (Section 5.8): camera-based hand tracking, "look + pinch" selection, pinch-drag, two-hand resize, palm menu | Apple Vision Pro and Galaxy XR style controls, adapted honestly to a phone with one rear camera and no eye tracking. |
+
+---
+
+## 1. Decisions to Approve
+
+- **Default optics profile**: Open VR Standard — 63 mm IPD, 90° FOV target, initial distortion `k1 = -0.18, k2 = 0.04`. Presets: Wide-FOV (64 mm), Compact Viewer (60 mm), and a live two-eye alignment calibration.
+  - *Note*: These are **starting values**, not truths. Real FOV depends on the phone's physical screen size and the lens-to-screen distance. The calibration flow (Section 5.3) must let the user fit distortion by eye, and the profile must scale by the device's real DPI (`xdpi`/`ydpi`).
+- **Rendering engine**: One custom OpenGL ES 3.0 pipeline (dual viewports → offscreen eye FBOs → distortion + chromatic-aberration pass, OES external textures, glTF 2.0 meshes). No Filament, to avoid a second engine.
+- **Startup**: Straight into the stereo launcher with a dismissible HUD for IPD alignment, re-center and entry to Settings.
+- **Secondary scope**: Media3 playback, glTF viewer, Bluetooth gamepad, opt-in voice commands.
+- **Excluded by design**: Android XR SDK (`androidx.xr.*`), because it targets dedicated OpenXR headsets rather than phones.
+- **Toolchain** (pin and verify when Stage 1 starts):
+  - AGP `9.1.1`, Gradle `9.3.1`, Kotlin `2.2.10` — match the container toolchain.
+  - `compileSdk = 36`, `targetSdk = 36`, `minSdk = 24`.
+  - Compose BOM and Material 3 for 2D screens. The `2024.09.00` BOM in the earlier draft is old; use the newest BOM compatible with the pinned Kotlin/AGP.
+  - CameraX `1.5.x`, Media3 `1.x` (latest stable), ARCore `com.google.ar:core` (latest stable, optional feature).
+  - MediaPipe Tasks Vision (Hand Landmarker) for hand tracking, loaded only in Stage 2. The `.task` model file is bundled in assets (a few MB) and verified by checksum; if the model or GPU delegate fails to load, hand control is disabled gracefully. Check the library's current license, minimum SDK and ABI support, and its APK-size impact at Stage 2 kickoff; the build should use ABI splits or an App Bundle to keep size reasonable.
+  - A version catalog (`libs.versions.toml`) is the single source of truth; a CI job fails if a dependency resolves differently from the catalog.
+
+---
+
+## 2. Feasibility Classification & Scope
+
+| Capability | Class | Reality on ordinary phones |
+| :--- | :--- | :--- |
+| Side-by-side stereo rendering, lens distortion, IPD/FOV calibration, 6 procedural environments, window manager (move/depth/resize/minimize), gaze dwell, app library via `<queries>`, DataStore settings, telemetry | **Fully implementable** | Needs only GPU, `Display`, `PackageManager`. |
+| 3-DOF head tracking, Bluetooth gamepad, Photo Picker gallery, Media3 playback, voice commands | **Needs compatible hardware** | Needs gyroscope (or rotation-vector sensor), a paired controller, microphone and speech service. Fallbacks: touch-drag look, gamepad look. |
+| Monocular camera passthrough, 3D overlay on camera feed, ARCore planes/anchors/light estimation, ARCore Depth | **Experimental** | One rear camera gives a flat feed, no stereo depth. Passthrough latency is typically well above dedicated headsets, so stationary use only. ARCore needs Google Play Services for AR and a supported device; depth is device-dependent. |
+| **ARCore 6-DOF positional tracking in the headset** | **Experimental / device-dependent** | Works only if the camera has a usable view (many headsets block or offset it). Auto-disabled with a clear message when tracking quality stays poor. |
+| **Camera-based hand tracking and gestures** (pinch, drag, two-hand resize, palm menu) | **Experimental / needs compatible hardware** | Needs the rear camera to see your hands, which means a headset with a camera cutout or open front, decent lighting, and a phone fast enough to run on-device hand landmark inference at ~30 fps. Landmarks come from one camera, so depth is estimated from hand size, not measured. Falls back to gaze dwell and gamepad whenever hands are unavailable. |
+| Stereo dual-camera passthrough, hosting live third-party app UIs inside 3D windows | **Not reproducible** | One camera cannot give two eye views; Android sandboxing blocks embedding other apps. Launching an app hands foreground to Android. |
+
+### Non-Goals
+- No mirroring/capturing other apps' screens (would need `MediaProjection`, a sensitive capability, and still not interactive).
+- No positional tracking without ARCore.
+- No Google Cardboard SDK dependency (deprecated; lens profile logic is our own).
+- No networked/multi-user features, accounts, or analytics SDKs.
+- No eye tracking (phones don't have it); "look" is head-gaze.
+- No full finger-level mid-air typing or sculpting precision; hand control targets selection, dragging, scrolling, resizing and poking large controls.
+- No claim of Apple Vision Pro / Galaxy XR parity: no stereo hand depth, no gaze-and-hand latency at their level, and no sensors beyond the phone's.
+
+### Honesty Guarantees
+- **No dead-end affordances**: every dock button, window type, preset and slider does real work; unsupported features are hidden or shown disabled with the reason.
+- **No broad permissions**: no `QUERY_ALL_PACKAGES` (use targeted `<queries>`), no `READ_EXTERNAL_STORAGE`/`READ_MEDIA_*` (use Photo Picker and SAF).
+- **Permissions requested only in context**: `CAMERA` at first passthrough, `RECORD_AUDIO` at first voice opt-in, `HIGH_SAMPLING_RATE_SENSORS` is a normal (install-time) permission.
+
+---
+
+## 3. User Experience
+
+### 3.1 Key Flows
+1. **First launch → Spatial Home.** Landscape immersive stereo. The Spatial Dock (Home, Apps, Browser, Media, Gallery, Settings, Environments, Control Center) floats below the workspace. A **gaze reticle** fills a radial ring over interactive targets (default 1.0 s dwell, configurable 0.5–2.0 s). Instant select: gamepad A/Enter, or a tap on the screen/headset button where available.
+   - **Out-of-headset path**: the first screen shows a brief "Put your phone in the headset" card with an "I'm using it in 2D / set up first" option leading to the Compose hub.
+2. **Window multitasking.** Windows (App Library, Browser, Media3 Player, Gallery, glTF Viewer, Optics/Quick Settings, Diagnostics) sit on a spherical arc, world-locked. Grab the title bar to change azimuth/elevation; push/pull depth (1.2–4.5 m); corner handles resize; minimize to a dock pill; close.
+   - **Limit**: max 4 active content windows (live WebView/video count against it); extra windows auto-suspend to a snapshot.
+3. **Passthrough (experimental).** Safety modal ("Stationary use only; never walk, cycle or drive") → `CAMERA` permission → CameraX frame on a full-bleed background quad. Denial falls back to virtual environments, never crashes.
+4. **Mode A ↔ Mode B switch** (CameraX ↔ ARCore) uses an explicit release-then-acquire state machine.
+5. **2D Hub (Compose).** Tabs: **Display, Tracking, Camera, Optics, Performance**, with live dual-viewport preview.
+6. **Launching a third-party app.** A stereo notice explains that the stereo view will be left. Optional: post a notification "Return to PALINDORME XR" so the user can come back without removing the phone.
+7. **Hand control (opt-in, experimental).** Settings → Input → "Hand control" starts a 20-second guided setup: safety/privacy note, camera permission, a "show your hand" check with live skeleton overlay, a pinch calibration (measures your pinch open/closed range), and a short practice target. Afterward: **look at a target (head-gaze reticle) and pinch thumb-to-index to select**, pinch and move to drag or scroll, pinch with both hands to resize, and raise an open palm toward the headset to open the Control Center. If hands are lost for more than ~1.5 s, a subtle indicator appears and gaze dwell / gamepad keep working with no interruption.
+
+### 3.2 Comfort & Motion-Sickness Design
+- **No artificial locomotion or camera motion**; the only moving element is the user's head.
+- **Horizon-stable, low-latency rendering is a comfort feature**: if frame time exceeds budget for >2 s, drop render scale before dropping frame rate.
+- **Recommended session break prompt** after 30 min (dismissible, configurable).
+- **Reticle and windows never lock to the head** (no head-locked content except the reticle and the brief HUD).
+- **First-use guidance**: sit down, 10 min first session.
+- **Pre-filled warnings**: not for children under the headset manufacturer's recommended age; stop if dizzy.
+
+### 3.3 Visual Identity — "Atmospheric Spatial Obsidian"
+- **Palette**: Canvas `#060913` · Glass `#121A2B` @ 78 % with 1 dp `#38BDF8` @ 28 % edge · Primary `#38BDF8` · Secondary `#818CF8` · Warning `#F59E0B` · Error `#FB7185`.
+- **Contrast rule**: all text on glass ≥ 4.5:1 (7:1 for text smaller than 18 sp inside 3D windows, since distortion and low-PPI optics blur edges). Verify during Stage 1 with an automated contrast check.
+- **Typography (bundled)**: Space Grotesk (headers) · Plus Jakarta Sans (body) · JetBrains Mono (telemetry). **Minimum text size in-headset: 20 sp-equivalent at 2 m** because phone panels' pixel density limits legibility through the lenses.
+- **Six GPU-light environments**: Minimal Futuristic Lab · Space Station · Modern Digital Workspace · Dark Futuristic Room · Nature (dusk, low-poly mountains, fireflies) · Abstract Floating Grid. Each exposes tint, ambient light, particle density, effects toggle and brightness. All are procedural (no large textures), under 1.5 MB total GPU memory per environment.
+- **OLED note**: the Dark Room and Space Station use true black to save power and increase perceived contrast.
+
+---
+
+## 4. Product Decisions & Trade-Offs
+
+### 4.1 Window Content Rendering
+- **Chosen**: each content window owns a `SurfaceTexture`/`Surface` pair.
+  - **WebView / Compose / Android Views**: draw onto the surface with `Surface.lockHardwareCanvas()` from a dedicated render handler (API 23+) and call `updateTexImage()` on the GL thread. A hidden off-screen host (`VirtualContentHost`) owns the views.
+  - **Media3**: call `ExoPlayer.setVideoSurface(surface)` directly. Hardware-decoded frames go straight into the texture without CPU copy. Protected (DRM) content that blocks surface capture is shown as unsupported with an explanation.
+  - **Gallery / Info / Settings panels**: drawn as Compose or custom views through the same path.
+  - **glTF viewer**: native GL, no surface.
+- **Touch injection**: gaze/gamepad raycasts produce `(u, v)` hit coordinates on a window; `InputInteractionManager` converts them to synthesized `MotionEvent`s (down/move/up) dispatched to the hosted view, plus key events for gamepad D-pad/back. Scroll is mapped from the gamepad stick or a gaze-drag gesture.
+- **Text input**: a built-in spatial keyboard window (QWERTY, voice dictation shortcut) is required because the system IME cannot be shown in headset mode. This is a Stage 1 item for the Browser address bar and search.
+- **Alternatives rejected**: pure Compose-to-Bitmap (too slow for video/scroll), Filament (binary size, custom OES pipeline).
+- **Known limitation**: hosting views off-screen costs memory and may lose WebView hardware acceleration on a few OEM builds; a software-fallback flag and a 2-window cap exist for low-RAM devices.
+
+### 4.2 Camera Lifecycle
+`CameraModeCoordinator`: `NONE → RELEASING → ACQUIRING_CAMERAX | ACQUIRING_ARCORE → ACTIVE`, tied to the activity lifecycle. Transitions are serialized on a single coroutine; each acquire waits for the previous release callback (with a 2 s timeout then forced close). Handles revocation, backgrounding, and `CAMERA_DISCONNECTED`/`CAMERA_IN_USE`.
+
+### 4.3 App Discovery
+Targeted `<queries>` for `ACTION_MAIN` + `CATEGORY_LAUNCHER` and media intents. A stereo-exit notice precedes `startActivity`.
+
+### 4.4 Sensor Fusion Choice
+- Default: `TYPE_GAME_ROTATION_VECTOR` (gyro + accelerometer, no magnetometer) → stable inside headsets.
+- Fallbacks in order: `TYPE_ROTATION_VECTOR` → accelerometer + magnetometer → touch/gamepad look.
+- Sampling at the fastest rate granted; **predictive tracking** extrapolates the orientation by the measured motion-to-photon estimate (default 20–30 ms, adjustable) using angular velocity.
+- **One-Euro filter** smooths jitter only when the head is nearly still, so fast motion stays lag-free.
+- Yaw drift is handled by long-press re-center and an optional auto-recenter on session start.
+
+---
+
+## 5. Technical Architecture
+
+### 5.1 Component Diagram
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│                  MainActivity (Immersive, Edge-to-Edge, Landscape)         │
+│  ┌───────────────────────────────┐    ┌─────────────────────────────────┐  │
+│  │   Stereo GL Surface           │    │ Compose Settings & Calibration  │  │
+│  │ (OpenGL ES 3.0 dual viewport) │◄──►│ (Display/Track/Cam/Optics/Perf) │  │
+│  └──────────────┬────────────────┘    └────────────────┬────────────────┘  │
+└─────────────────┼──────────────────────────────────────┼───────────────────┘
+                  │ lock-free snapshots / StateFlow      │
+                  ▼                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                          XRLauncher Coordinator                            │
+│ HeadTrackingEngine · InputInteractionManager · XRSettingsManager           │
+│ SpatialWindowManager · VirtualContentHost · AndroidAppManager              │
+│ StereoRenderingEngine · VirtualEnvironmentManager · CameraModeCoordinator  │
+│ CameraEngine (CameraX) · ARPerceptionEngine (ARCore) · PerformanceMonitor  │
+│ HandTrackingEngine · GestureRecognizer · HandRayInteractor                 │
+│ SharedCameraFrameSource (one camera owner, many consumers)                 │
+│ SpatialKeyboard · ComfortManager · VoiceCommandManager (opt-in)            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 Threading Rules
+- **GL thread**: only reads immutable snapshots; no allocations, no I/O, no locks in `onDrawFrame`. Pre-allocated matrices/vectors; object pools for events.
+- **Sensor thread**: dedicated `HandlerThread`; writes the latest orientation into a seqlock or triple-buffer.
+- **Content thread**: `VirtualContentHost` draws views at ≤ 30 fps for static UI, ≤ native rate for video/web scrolling.
+- **IO/Default**: app discovery, DataStore, telemetry; expose `StateFlow`.
+- **Interaction loop** (per frame): raycast gaze or controller ray against window planes and dock items → dwell timers → dispatch click / drag / push-pull / resize.
+
+### 5.3 Rendering Pipeline
+1. Update head pose (predicted) → per-eye view matrices with IPD offset.
+2. Render environment, windows (glass shader), reticle, glTF to **left/right eye FBOs** (render-scale adjustable 0.6–1.0).
+3. **Distortion pass**: use a **pre-computed distortion mesh** (e.g., 40×40 per eye) with per-channel UVs for chromatic aberration rather than a full-screen fragment solve. This is cheaper on mobile GPUs.
+4. Present side by side to the phone display, respecting the display's refresh rate. Request the highest stable mode via `preferredDisplayModeId`, keep screen on, and set the window to `FLAG_KEEP_SCREEN_ON` and sustained-performance mode where supported.
+5. Calibration: a two-eye grid screen lets the user adjust IPD, per-eye vertical offset, distortion strength and FOV; results persist per device.
+
+### 5.4 Performance Budgets (targets, verified on the device matrix)
+| Metric | Target |
+| :--- | :--- |
+| Frame time | ≤ 11.1 ms at 90 Hz, ≤ 16.6 ms at 60 Hz, p95 under budget |
+| Motion-to-photon (est.) | ≤ 30 ms with prediction |
+| Memory | < 600 MB total with 3 windows; GL textures < 200 MB |
+| Cold start to first stereo frame | < 2.5 s |
+| Battery | ≤ ~25 %/hour on a reference mid-range device with a static scene (measured, not promised) |
+
+**Adaptive quality tiers** (driven by `PowerManager.getCurrentThermalStatus()` on API 29+, plus frame-time history and battery): render-scale reduction → effects off → environment particles off → 60 Hz lock → thermal warning banner → suspend passthrough/ARCore. Use ADPF `PerformanceHintManager` on API 31+ for the GL and content threads. Low-Power Mode toggles a conservative tier.
+
+### 5.5 Persistence & Settings
+Jetpack DataStore (Proto or Preferences) with schema versioning and migrations. Settings: optics profile per device, dwell time, comfort options, environment parameters, favorites/recents, voice opt-in. Corrupt-store recovery resets to defaults without crashing.
+
+### 5.6 Privacy & Security
+- Camera frames stay in memory, are never written to disk or sent over the network.
+- No network permission beyond `INTERNET` for the Browser window; no analytics or ads SDKs; crash logs stay local unless the user shares them.
+- Browser: no autofill of saved credentials, HTTPS-only upgrade where possible, per-session cookie option, a visible URL bar in-window, safe-browsing enabled.
+- Voice: on-device recognition preferred (`createOnDeviceSpeechRecognizer`, API 33+); on older versions the app states clearly that audio may be processed by the system speech service.
+- Manifest: `android:required="false"` for ARCore, camera, gyroscope-dependent features; `uses-feature` flags so Play does not filter out compatible phones.
+
+### 5.7 Accessibility
+- Every dock item and window control has a semantic label (for TalkBack when used in 2D).
+- Adjustable dwell time, optional audio click, "large text" window scale, high-contrast glass option, reduce-motion setting (disables particles and parallax).
+- Left-handed controller mapping.
+- All settings are reachable without gaze (Compose hub with normal touch).
+- Hand control is never required: every action has a gaze-dwell or gamepad equivalent. A one-handed mode (right or left) and a "relaxed pinch" sensitivity setting support limited dexterity.
+
+### 5.8 Hand Interaction System
+
+**Goal**: an Apple Vision Pro / Galaxy XR-style interaction model — *look to target, pinch to select* — built honestly for a phone in a passive headset. Phones have **no eye tracking**, so "look" is **head-gaze** (the reticle at the center of view). Hands come from the **rear camera** only.
+
+#### 5.8.1 Pipeline
+1. **Frame source**: `SharedCameraFrameSource` is the single owner of the rear camera and feeds consumers: the passthrough OES quad, the hand tracker, and ARCore (via its CPU image when in ARCore mode). This keeps `CameraModeCoordinator` rules intact (Section 4.2) because hand tracking is a *consumer*, not a second camera owner.
+2. **Inference**: `HandTrackingEngine` runs an on-device hand landmark model (default: MediaPipe Tasks Vision *Hand Landmarker*, 21 landmarks per hand, up to 2 hands, GPU delegate with CPU fallback). It runs on its own `HandlerThread` at a target of ~30 fps using CameraX `ImageAnalysis` (`STRATEGY_KEEP_ONLY_LATEST`) at a low resolution (e.g., 640×480), so it never blocks the GL thread.
+3. **Filtering**: landmarks pass through a per-landmark One-Euro filter (stronger smoothing at rest, light when moving) plus a short prediction step to hide inference latency.
+4. **Pose to 3D**: the camera is mounted on the phone, so hands are expressed in camera space and mapped into head-relative world space using the current head pose. Depth uses the model's world-scale landmarks, with the user's calibrated palm width as the scale reference. Hands are drawn as a minimal translucent skeleton or soft fingertip dots (a toggleable overlay), never as a photo.
+5. **Gesture recognition** (`GestureRecognizer`, pure Kotlin, unit-tested): a small state machine per hand with hysteresis. Output events are consumed by `InputInteractionManager` exactly like gamepad input.
+6. **Interaction**: `HandRayInteractor` supplies target selection and manipulation (below).
+
+#### 5.8.2 Gesture Vocabulary
+
+| Gesture | Detection | Action |
+| :--- | :--- | :--- |
+| **Look + Pinch** (primary) | Thumb-tip to index-tip distance, normalized by palm width, crosses a close threshold (e.g., < 0.25) then releases above an open threshold (> 0.45; hysteresis prevents flicker) | Select / click the target under the gaze reticle. Fires on **release** after a pinch of < 400 ms, like a tap. |
+| **Pinch-hold + move** | Pinch stays closed beyond the tap time | Drag a window (azimuth/elevation), drag a slider, or scroll content. Hand movement maps to angular motion with adjustable gain. The *target is locked* at pinch start so head motion doesn't change what you're dragging. |
+| **Pinch-hold + push/pull** | Closed pinch, hand moves toward/away from the camera (hand scale change) | Window depth (1.2–4.5 m), clamped and eased. |
+| **Two-hand pinch** | Both hands pinch the same window | Resize (spread/close) and rotate in yaw; resizing is clamped to min/max sizes. |
+| **Direct poke (near targets)** | Index fingertip within ~3 cm of a window's virtual surface, within reach | Direct touch: tap or scroll without gaze. Works well for the Spatial Keyboard and sliders. Shows a small fingertip hover glow. |
+| **Palm open toward headset** | Open palm, facing the camera, held ~0.6 s | Open or close the Control Center; shows a ring filling during the hold. |
+| **Pinch on the dock pill / handle** | Same as Look+Pinch | Minimize, restore or close windows. |
+| **Two-finger scroll** (optional) | Index + middle extended, move vertically | Scroll the focused window without needing a tap-hold. |
+| **Cancel** | Hands drop out of frame or an open palm is shown during a drag | Drag is cancelled and the window returns to its prior position. |
+
+Each gesture has a **debounce** (minimum 3 consistent frames), a **confidence gate** (tracking score threshold), and a **per-hand dominant** setting. Look+Pinch needs no raising of the arm: a relaxed hand in the lower-center field of view is enough.
+
+#### 5.8.3 Ray, Targeting and Feedback
+- **Primary targeting is head-gaze**; the pinch only confirms. This matches the "eyes + hand" mental model and is more accurate than pointing with a monocular hand pose.
+- **Hand-ray mode** (optional, in settings): a ray from the shoulder-estimated origin through the index finger/wrist lets users point at targets instead of using head-gaze. It is more sensitive to tracking error, so it is off by default and uses a larger hit-target snap radius.
+- **Target snapping and magnetism**: the reticle slightly snaps to interactive element centers within a small angular radius; larger hit-boxes for dock icons and handles (minimum ~48 dp-equivalent at 2 m).
+- **Feedback** (hands have no physical click): hover highlight, reticle morphs into a small ring when a hand is detected, a ring-contract animation as the pinch closes, a soft audio tick on select, and **haptic pulse on the phone** where the device allows it. All can be toggled.
+- **Tracking-lost UX**: a faint "hand not visible" glyph near the bottom of the view; gaze dwell is auto-enabled (configurable) while hands are lost so the user is never stuck.
+
+#### 5.8.4 Setup & Personalization
+- **Calibration**: measures palm width, pinch closed/open range, and the comfortable hand zone in the camera frame. Stored per user profile (DataStore).
+- **Handedness**: left, right, or both. Left-handed mirror mapping is automatic when the model reports handedness (note: the camera image may be mirrored — a unit test pins down this convention).
+- **Lighting check**: if the mean frame luminance is too low or the hand is repeatedly lost, a hint explains "Move to a brighter area".
+- **Camera-visibility check**: if no hand is ever detected during setup and the frame looks dark/blocked, the app explains that the headset may block the camera and hand control isn't possible with this headset, then keeps gaze/gamepad.
+
+#### 5.8.5 Performance, Thermal and Battery
+- Hand inference is the most expensive new subsystem. Targets: **≤ 25 ms per frame end-to-end on the reference mid-range device**, and **≤ 15 % additional frame-budget impact on the GL thread** (it shares the GPU if the GPU delegate is used).
+- **Adaptive hand tier** (extends Section 5.4): lower analysis resolution → 20 fps → single-hand mode → disable hand tracking and show a banner (gaze/gamepad continue). Uses thermal status and frame-time history.
+- **Idle gating**: if no hand has been detected for 10 s, drop to a low-rate "wake-up" probe (e.g., 5 fps), resuming full rate when a hand appears.
+- **Passthrough off, hands on**: the camera runs for hand tracking even when the passthrough feed isn't drawn; a persistent camera-active indicator is shown in the HUD in this case.
+
+#### 5.8.6 Privacy & Safety
+- Frames for hand tracking are processed **in memory on the device**, never saved or transmitted; only landmark numbers are used downstream.
+- Hand control requires the same `CAMERA` permission and an explicit opt-in; a **visible camera-in-use indicator** is always shown while it runs.
+- The same stationary-use warning applies whenever the camera is active, and passthrough/hand-control use is never allowed while moving fast (the app can optionally detect high-acceleration motion and show a warning).
+- No gesture triggers destructive or purchase-like actions without a confirmation step; a **"Hands off" quick toggle** in the HUD and Control Center disables hand input instantly.
+
+#### 5.8.7 Interaction with ARCore (Mode B)
+In ARCore mode, the hand tracker reads ARCore's CPU camera image (`acquireCameraImage`) instead of opening CameraX. Throughput is lower, so the hand tier drops to ~20 fps by default; ARCore planes and anchors keep working. If the device can't deliver both within budget, ARCore keeps priority and hand control falls back to gaze/gamepad with an on-screen note.
+
+---
+
+## 6. Staged Delivery
+
+### Stage 1 — Core Spatial VR Launcher
+Adaptive icon, bundled fonts, module contracts, `StereoRenderingEngine`, `HeadTrackingEngine`, `InputInteractionManager` (gaze, gamepad, opt-in voice), `SpatialWindowManager` + `VirtualContentHost`, `SpatialKeyboard`, windows (Browser, Media3 Player, App Library, Gallery, Settings, glTF viewer, Info), six environments, Compose hub, `PerformanceMonitor`, `ComfortManager`.
+
+**Acceptance**
+- Cold start → stereo home in < 2.5 s on the reference device.
+- Head pose updates within 1 frame; re-center works.
+- Calibration changes persist and apply live.
+- Each window type opens, moves, resizes, minimizes and closes without leaks (LeakCanary clean).
+- Gamepad can operate every control; gaze can operate every control.
+- Green Gradle build; unit and instrumented tests pass.
+
+### Stage 2 — Experimental Monocular Passthrough & Hand Control
+`SharedCameraFrameSource`, `HandTrackingEngine`, `GestureRecognizer`, `HandRayInteractor`, hand setup/calibration flow, skeleton overlay, haptic/audio feedback, the "Hands off" toggle, and the gaze fallback logic (Section 5.8). Stage 1 ships gaze dwell and gamepad only; hand control builds on the Stage 1 `InputInteractionManager` event interface, so no Stage 1 rework is needed. Safety dialog, runtime permission with rationale and revocation recovery, `CameraEngine` with OES quad, brightness/exposure/resolution controls, lens-distortion correction of the camera feed (optional) so real-world edges aren't doubly warped.
+
+**Acceptance**
+- Denied/revoked permission falls back to an environment in < 1 s with an explanation.
+- Backgrounding and returning restores the preview.
+- Passthrough latency measured and shown in diagnostics.
+- Look + Pinch selects the correct target on ≥ 95 % of 100 scripted trials per device (recorded hand-landmark replay for CI, live trials on device).
+- No false pinches in a 5-minute "hands resting / gesturing while talking" replay; false-positive rate target < 1 per minute.
+- Hand tracking end-to-end latency (camera frame → gesture event) measured and shown in diagnostics; target ≤ 80 ms.
+- Losing the camera, hands, or permission falls back to gaze dwell in < 1.5 s with a visible indicator.
+- "Hands off" toggle disables hand input immediately and leaves the camera closed if passthrough is also off.
+- Green build and tests.
+
+### Stage 3 — Optional ARCore & Release Packaging
+`ARPerceptionEngine` (`checkAvailability`, install prompt flow), coordinator switch, planes, light estimation, depth occlusion (if supported), anchors, optional 6-DOF positional tracking with a tracking-quality indicator and auto-fallback to 3-DOF.
+
+**Acceptance**
+- 100 consecutive A↔B switches without a camera error; hand tracking resumes correctly after each switch (or falls back with a note when ARCore has priority).
+- Unsupported devices show a clear VR-only state; no ARCore classes load.
+- Signed release APK and debug APK build; `lint` and `R8` release build verified; app size reported.
+- Documents delivered: Feasibility, Architecture, Honest 3-State Testing.
+
+---
+
+## 7. Testing Strategy
+
+| Layer | Tool | Covers |
+| :--- | :--- | :--- |
+| Pure logic unit tests | JUnit | Quaternion math, filters, prediction, raycasts, distortion mesh generation, window placement/limits, settings migrations, state machines |
+| Android-framework tests | Robolectric | DataStore, app discovery with `<queries>`, permission flows, coordinator state machine |
+| GL correctness | Instrumented tests on device/emulator with software GL | Shader compile/link, FBO completeness, golden-image tests for each environment and the distortion mesh |
+| UI | Compose UI tests | Settings, calibration, permission rationale |
+| Device runs | Manual + scripted on matrix | Latency, thermal, battery, sensor quality |
+| Soak | 30-min automated run | Memory growth, GL object leaks, thermal tiering |
+| Gesture logic | JUnit with recorded landmark traces | Pinch hysteresis, tap vs. hold, drag target-lock, two-hand resize, palm-open, handedness mirroring, dropout and recovery |
+| Hand tracking on device | Manual + scripted | Latency, accuracy under bright/dim light, different skin tones and hand sizes, sleeves and rings, hands near frame edges, thermal and battery with inference running |
+
+**Device matrix (minimum)**: a low-RAM Android 7–9 phone, a mid-range Android 11–12, a flagship Android 14+, a phone without gyroscope (fallback), a phone with ARCore and one without, one with a 120 Hz display, and one with a notch/cutout.
+
+**Honest 3-State Testing document** records each feature as: *Verified on device* · *Verified in emulator/unit only* · *Not tested* — never merged.
+
+---
+
+## 8. Risk Register
+
+| Risk | Likelihood | Impact | Mitigation |
+| :--- | :--- | :--- | :--- |
+| Thermal throttling in a closed headset | High | High | Adaptive tiers, ADPF, 60 Hz fallback, break prompts |
+| High motion-to-photon latency → nausea | Medium | High | Prediction, low-latency render path, render-scale first |
+| WebView/Compose hardware-canvas quirks on some OEMs | Medium | Medium | Software fallback, window cap, device-specific allowlist |
+| Phone screen resolution too low for legible text | High | Medium | 20 sp minimum, large-text mode, bold glass UI |
+| ARCore unusable in headset (camera blocked) | High | Low | Auto-detect poor tracking, fall back to 3-DOF |
+| Sensor drift / no gyro | Medium | Medium | Game rotation vector, recenter, touch/gamepad look |
+| Play Store policy issues (camera, queries) | Low | High | Targeted `<queries>`, in-context permissions, privacy policy |
+| Dependency drift | Medium | Medium | Version catalog, CI check |
+| Headset blocks the rear camera, so hands can't be seen | High | Medium | Detect during setup; keep gaze/gamepad as full equivalents; document headsets known to work |
+| Hand inference too slow / hot on mid-range phones | High | High | Adaptive hand tier, idle gating, single-hand mode, auto-disable with banner |
+| False pinches cause accidental actions | Medium | Medium | Hysteresis, debounce, confidence gate, confirmation for destructive actions, "Hands off" toggle |
+| Monocular depth error makes push/pull and poke inaccurate | High | Low | Gaze-first targeting, calibrated palm width, depth gestures clamped and eased, poke limited to large targets |
+| Uneven tracking across skin tones, lighting, hand sizes | Medium | High | Test across diverse users and lighting; show hints; never gate essential actions on hands |
+
+---
+
+## 9. Open Questions for You
+1. Is the target primarily personal/sideload use or Play Store distribution? (Affects privacy policy, review effort, and signing.)
+2. Should the Browser allow any site, or ship with a curated start page and optional content filter?
+3. Is DRM video (Netflix-like) in scope? (Not feasible with the surface-capture approach; the plan assumes no.)
+4. Which devices do you actually own for testing? The matrix above should be trimmed to what you can run.
+5. Which headset(s) will you use? Hand control only works if the headset leaves the rear camera uncovered (a cutout or open front), so this decides whether hand control is a headline feature or a bonus.
+6. Is MediaPipe's on-device hand model acceptable, or do you want a different tracker (smaller, custom-trained, or licensed)?
+7. Should "Look + Pinch" be the default input out of the box when a hand is detected, or should gaze dwell remain the default until the user opts in?

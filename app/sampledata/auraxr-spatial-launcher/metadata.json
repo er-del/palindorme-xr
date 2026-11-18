@@ -1,0 +1,6 @@
+{
+  "name": "AuraXR Spatial Launcher",
+  "description": "A Vision Pro-style spatial OS launcher for Android XR with floating glass windows, immersive VR environments, and spatial apps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

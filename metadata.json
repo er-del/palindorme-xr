@@ -1,0 +1,8 @@
+{
+  "name": "Remix PALINDORME XR",
+  "description": "Stereoscopic spatial computing launcher and dual-viewport OpenGL ES 3.0 VR/XR environment for Android phones with 3-DOF/ARCore tracking, floating spatial windows, experimental monocular passthrough, and camera-based hand interaction.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
